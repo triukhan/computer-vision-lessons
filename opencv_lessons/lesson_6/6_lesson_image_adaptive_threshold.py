@@ -2,7 +2,7 @@ import os
 import cv2
 
 
-image_path = os.path.join('opencv_lessons', 'lesson_6', 'adaptive_thresholding.png')
+image_path = os.path.join('opencv_lessons', 'data', 'adaptive_thresholding.png')
 image = cv2.imread(image_path)
 
 image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
