@@ -1,6 +1,6 @@
 import os
 import cv2
-import numpy
+
 
 image_path = os.path.join('opencv_lessons', 'data', 'img_threshold.png')
 image = cv2.imread(image_path)
