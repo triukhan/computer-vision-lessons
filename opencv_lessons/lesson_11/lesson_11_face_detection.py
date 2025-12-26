@@ -9,6 +9,7 @@ import math
 import cv2
 import numpy as np
 
+
 MARGIN = 10
 ROW_SIZE = 10
 FONT_SIZE = 1

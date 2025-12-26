@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy
 
-image_path = os.path.join('opencv_lessons', 'data', 'img.png')
+image_path = os.path.join('opencv_lessons', 'data', 'img.jpg')
 image = cv2.imread(image_path)
 
 image_edge = cv2.Canny(image, 50, 150)
