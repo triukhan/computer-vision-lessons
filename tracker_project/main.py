@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture('tracker_project/road.mp4')
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
 bbox = None
@@ -83,8 +83,8 @@ def bbox_from_corners(corners):
 def track_object_with_kalman(video, stop=False):
     global need_init, bbox
     counter, kf, points, prev_gray = 0, None, None, None
-
-    cv2.namedWindow('tracking with kalman')
+    cv2.namedWindow('tracking with kalman', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('tracking with kalman', 1400, 1000)
     cv2.setMouseCallback('tracking with kalman', on_mouse)
 
     while True:
@@ -222,4 +222,4 @@ def track_object_with_kalman(video, stop=False):
     cv2.destroyAllWindows()
 
 
-track_object_with_kalman(video=cap, stop=False)
+track_object_with_kalman(video=cap, stop=True)

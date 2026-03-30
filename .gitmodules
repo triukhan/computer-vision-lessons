@@ -1,0 +1,6 @@
+[submodule "external/OSTrack"]
+	path = external/OSTrack
+	url = https://github.com/botaoye/OSTrack.git
+[submodule "tracker_project/external/OSTrack"]
+	path = tracker_project/external/OSTrack
+	url = https://github.com/botaoye/OSTrack.git

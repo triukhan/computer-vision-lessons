@@ -3,17 +3,16 @@ import numpy as np
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
-import torchvision.models as models
 from siam_tracker.model import Backbone
 
-cap = cv2.VideoCapture('/Users/danylo/Documents/computer-vision-lessons/tracker_project/helicopter.mp4')
+cap = cv2.VideoCapture('/home/danylo/GIT/computer-vision-lessons/tracker_project/helicopter.mp4')
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
 bbox = None
 need_init = False
 
 
-def crop(frame, bbox, size=255):
+def crop(frame, bbox, size):
     cx, cy, w, h = bbox
 
     context = 0.5 * (w + h)
@@ -66,16 +65,20 @@ def update_bbox(prev_bbox, pos, response_size=17, stride=8):
     disp_x = (col - response_size // 2) * stride
     disp_y = (row - response_size // 2) * stride
 
-    new_cx = cx + disp_x
-    new_cy = cy + disp_y
+    disp_x = np.clip(disp_x, -20, 20)
+    disp_y = np.clip(disp_y, -20, 20)
 
-    return (new_cx, new_cy, w, h)
+    alpha = 0.2  # smoothing
+    new_cx = cx + alpha * disp_x
+    new_cy = cy + alpha * disp_y
+
+    return new_cx, new_cy, w, h
 
 
 class SiameseTracker(nn.Module):
     def __init__(self):
         super().__init__()
-        self.backbone = models.alexnet(pretrained=True).features
+        self.backbone = Backbone()
 
     def forward(self, template, search):
         z = self.backbone(template)
@@ -112,15 +115,10 @@ class SiamTracker:
         search = preprocess(search)
 
         with torch.no_grad():
-
             search_feature = self.model.backbone(search)
+            response = cross_correlation(self.template_feature, search_feature)
 
-            response = cross_correlation(
-                self.template_feature,
-                search_feature
-            )
-
-        response = response.squeeze().cpu().numpy()
+        # response = response.squeeze().cpu().numpy()
         pos = response.view(-1).argmax().item()
 
         return update_bbox(prev_bbox, pos)
@@ -131,7 +129,7 @@ def on_mouse(event, x, y, _, __):
 
     if event == cv2.EVENT_LBUTTONDOWN:
         w, h = 60, 60
-        bbox = (x, y, w, h)
+        bbox = (x - w//2, y - h//2, w, h)
         print(bbox)
 
         need_init = True
