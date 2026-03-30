@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
 bbox = None
@@ -30,7 +30,7 @@ def create_kalman():
     ], np.float32)
 
     kalman_f.processNoiseCov = np.eye(8, dtype=np.float32) * 0.01
-    kalman_f.measurementNoiseCov = np.eye(4, dtype=np.float32) * 2
+    kalman_f.measurementNoiseCov = np.eye(4, dtype=np.float32) * 0.05
 
     return kalman_f
 
@@ -122,8 +122,6 @@ def track_object_with_kalman(video, stop=False):
 
             pred_x = int(px - pw/2)
             pred_y = int(py - ph/2)
-
-            # print(f'KALMAN PREDICTION [{counter}]: ', pred_x, pred_y, pw, ph)
 
             new_pts, status, err = cv2.calcOpticalFlowPyrLK(
                 prev_gray,
