@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-cap = cv2.VideoCapture('tracker_project/road.mp4')
+cap = cv2.VideoCapture('tracker_project/2796079-uhd_3840_2160_25fps.mp4')
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
 bbox = None

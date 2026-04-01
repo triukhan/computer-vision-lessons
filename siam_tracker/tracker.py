@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torch
 from siam_tracker.model import Backbone
+import torchvision.models as models
 
 cap = cv2.VideoCapture('/home/danylo/GIT/computer-vision-lessons/tracker_project/helicopter.mp4')
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -12,10 +13,9 @@ bbox = None
 need_init = False
 
 
-def crop(frame, bbox, size):
-    cx, cy, w, h = bbox
-
-    context = 0.5 * (w + h)
+def crop(frame, cbbox, size, context_factor=0.5):
+    cx, cy, w, h = cbbox
+    context = context_factor * (w + h)
     crop_size = int(np.sqrt((w + context) * (h + context)))
 
     x1 = int(cx - crop_size / 2)
@@ -55,47 +55,54 @@ def preprocess(img):
 
     return tensor
 
-
-def update_bbox(prev_bbox, pos, response_size=17, stride=8):
+def update_bbox(prev_bbox, pos, response_size=8, stride=8):
     cx, cy, w, h = prev_bbox
-
     row = pos // response_size
     col = pos % response_size
+    center = response_size // 2
 
-    disp_x = (col - response_size // 2) * stride
-    disp_y = (row - response_size // 2) * stride
+    disp_x = (col - center) * stride
+    disp_y = (row - center) * stride
 
-    disp_x = np.clip(disp_x, -20, 20)
-    disp_y = np.clip(disp_y, -20, 20)
+    # Прибираємо clip — нехай рухається як треба
+    # Прибираємо alpha — displacement вже в пікселях патчу,
+    # але треба перевести назад у координати оригінального кадру
 
-    alpha = 0.2  # smoothing
-    new_cx = cx + alpha * disp_x
-    new_cy = cy + alpha * disp_y
+    # search патч був 255px і покривав певну область кадру
+    # треба масштабувати displacement відповідно
+    search_size = 255
+    cx_s, cy_s, w_s, h_s = prev_bbox
+    context = 0.8 * (w_s + h_s)
+    crop_size = np.sqrt((w_s + context) * (h_s + context))
+    scale = crop_size / search_size   # скільки пікселів кадру = 1px патчу
+
+    new_cx = cx + disp_x * scale
+    new_cy = cy + disp_y * scale
 
     return new_cx, new_cy, w, h
-
 
 class SiameseTracker(nn.Module):
     def __init__(self):
         super().__init__()
-        self.backbone = Backbone()
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        layers = list(resnet.children())
+
+        # Просто беремо backbone без змін (найстабільніший варіант)
+        self.backbone = nn.Sequential(*layers[:7])
 
     def forward(self, template, search):
-        z = self.backbone(template)
-        x = self.backbone(search)
-        response = cross_correlation(z, x)
+        pass
 
-        return response
+def cross_correlation(z, x):
+    b, c, h, w = z.shape
+    z_kernel = z.view(c, 1, h, w)
+    response = F.conv2d(x, z_kernel, groups=c)
+    response = response.mean(dim=1, keepdim=True)
 
 
-def cross_correlation(template, search):
-    batch = search.size(0)
+    # response = F.conv2d(x, z, groups=z.size(0))
 
-    out = []
-    for i in range(batch):
-        out.append(F.conv2d(search[i:i+1], template[i:i+1]))
-
-    return torch.cat(out)
+    return response
 
 
 class SiamTracker:
@@ -103,25 +110,43 @@ class SiamTracker:
         self.model = model
         self.template_feature = None
 
-    def init(self, frame, bbox):
-        template = crop(frame, bbox, size=127)
+    def init(self, frame, ibbox):
+        template = crop(frame, ibbox, size=127, context_factor=0.6)
         template = preprocess(template)
 
         with torch.no_grad():
             self.template_feature = self.model.backbone(template)
 
     def track(self, frame, prev_bbox):
-        search = crop(frame, prev_bbox, size=255)
+        search = crop(frame, prev_bbox, size=255, context_factor=0.8)
         search = preprocess(search)
 
         with torch.no_grad():
             search_feature = self.model.backbone(search)
             response = cross_correlation(self.template_feature, search_feature)
 
-        # response = response.squeeze().cpu().numpy()
-        pos = response.view(-1).argmax().item()
+        response_np = response.squeeze().cpu().numpy()
 
-        return update_bbox(prev_bbox, pos)
+
+        # Нормалізація
+        response_np = response_np - response_np.mean()  # ← mean замість min, краще для шумних мап
+        response_np = response_np / (response_np.std() + 1e-8)
+        h, w = response_np.shape
+        hanning = np.outer(np.hanning(h), np.hanning(w))
+        window_influence = 0.40  # було 0.05
+        response_np = (1 - window_influence) * response_np + window_influence * hanning
+
+        pos = np.argmax(response_np)
+
+        debug_norm = response_np - response_np.min()
+        debug_norm = debug_norm / (debug_norm.max() + 1e-8)
+        debug = cv2.resize(debug_norm, (200, 200), interpolation=cv2.INTER_NEAREST)
+        debug = (debug * 255).astype(np.uint8)
+        debug_color = cv2.applyColorMap(debug, cv2.COLORMAP_JET)
+        cv2.imshow('response map', debug_color)
+
+
+        return update_bbox(prev_bbox, pos, response_size=h, stride=8)
 
 
 def on_mouse(event, x, y, _, __):
@@ -129,7 +154,7 @@ def on_mouse(event, x, y, _, __):
 
     if event == cv2.EVENT_LBUTTONDOWN:
         w, h = 60, 60
-        bbox = (x - w//2, y - h//2, w, h)
+        bbox = (x, y, w, h)
         print(bbox)
 
         need_init = True
@@ -155,13 +180,13 @@ def track_object(video, stop=False):
             skip_first = True
 
         if skip_first:
-            x, y, w, h = bbox
-            cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 0, 255), 1)
+            cx, cy, w, h = bbox
+            cv2.rectangle(frame, (int(cx-w//2), int(cy-h//2)), (int(cx+w//2), int(cy+h//2)), (0, 0, 255), 1)
             skip_first = False
         elif bbox:
             bbox = tracker.track(frame, bbox)
-            x, y, w, h = bbox
-            cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 0, 255), 1)
+            cx, cy, w, h = bbox
+            cv2.rectangle(frame, (int(cx-w//2), int(cy-h//2)), (int(cx+w//2), int(cy+h//2)), (0, 0, 255), 1)
 
         cv2.imshow('tracking with siam', frame)
 
@@ -174,4 +199,5 @@ def track_object(video, stop=False):
     cv2.destroyAllWindows()
 
 
+on_mouse(cv2.EVENT_LBUTTONDOWN, 166, 221, None, None)
 track_object(video=cap, stop=True)
