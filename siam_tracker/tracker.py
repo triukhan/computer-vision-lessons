@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import numpy as np
 import torch.nn.functional as F
@@ -6,40 +8,34 @@ import torch
 from siam_tracker.model import BaselineEmbeddingNet, SiameseTracker
 import torchvision.models as models
 
-cap = cv2.VideoCapture('/home/danylo/GIT/computer-vision-lessons/tracker_project/helicopter.mp4')
-cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-bbox = None
-need_init = False
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+MODEL_PATH = PROJECT_ROOT / 'BaselinePretrained.pth.tar'
+H, W = 60, 60
 
 
-def crop(frame, cbbox, size, context_factor=0.5):
-    cx, cy, w, h = cbbox
+def crop(frame, bbox, size: int, context_factor: float = 0.5):
+    cx, cy, w, h = bbox
+
+    # expand bbox with contex factor
     context = context_factor * (w + h)
-    crop_size = int(np.sqrt((w + context) * (h + context)))
+    crop_size = int(np.sqrt((w + context) * (h + context)))  # sqrt saves proportions
+    x1, y1 = int(cx - crop_size / 2), int(cy - crop_size / 2)
+    x2, y2 = int(cx + crop_size / 2), int(cy + crop_size / 2)
 
-    x1 = int(cx - crop_size / 2)
-    y1 = int(cy - crop_size / 2)
-    x2 = int(cx + crop_size / 2)
-    y2 = int(cy + crop_size / 2)
+    # if edge of the frame - add black pixels instead
+    left, right = max(0, -x1), max(0, x2 - frame.shape[1])
+    top, bottom = max(0, -y1), max(0, y2 - frame.shape[0])
 
-    left = max(0, -x1)
-    top = max(0, -y1)
-    right = max(0, x2 - frame.shape[1])
-    bottom = max(0, y2 - frame.shape[0])
-
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(frame.shape[1], x2)
-    y2 = min(frame.shape[0], y2)
+    x1, y1 = max(0, x1), max(0, y1)  # clamping after expanding
+    x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
 
     cropped = frame[y1:y2, x1:x2]
 
     if top or bottom or left or right:
         cropped = cv2.copyMakeBorder(
-            cropped, top, bottom, left, right,
-            borderType=cv2.BORDER_CONSTANT,
-            value=(0,0,0)
+            cropped, top, bottom, left, right, borderType=cv2.BORDER_CONSTANT, value=(0,0,0)
         )
 
     cropped = cv2.resize(cropped, (size, size))
@@ -55,8 +51,8 @@ def preprocess(img):
 
     return tensor
 
+
 def update_bbox(prev_bbox, pos, response_size=8, stride=8):
-    cx, cy, w, h = prev_bbox
     row = pos // response_size
     col = pos % response_size
     center = response_size // 2
@@ -65,62 +61,61 @@ def update_bbox(prev_bbox, pos, response_size=8, stride=8):
     disp_y = (row - center) * stride
 
     search_size = 255
-    cx_s, cy_s, w_s, h_s = prev_bbox
-    context = 0.8 * (w_s + h_s)
-    crop_size = np.sqrt((w_s + context) * (h_s + context))
+    prev_cx, prev_cy, prev_w, prev_h = prev_bbox
+    context = 0.8 * (prev_w + prev_h)
+    crop_size = np.sqrt((prev_w + context) * (prev_h + context))
     scale = crop_size / search_size
 
-    new_cx = cx + disp_x * scale
-    new_cy = cy + disp_y * scale
+    new_cx = prev_cx + disp_x * scale
+    new_cy = prev_cy + disp_y * scale
 
-    return new_cx, new_cy, w, h
+    # smoothing
+    alpha = 0.5
+    new_cx = alpha * new_cx + (1 - alpha) * prev_cx
+    new_cy = alpha * new_cy + (1 - alpha) * prev_cy
 
-def cross_correlation(z, x):
-    b, c, h, w = z.shape
-    z_kernel = z.view(c, 1, h, w)
-    response = F.conv2d(x, z_kernel, groups=c)
-    response = response.mean(dim=1, keepdim=True)
-
-    return response
+    return new_cx, new_cy, 60, 60
 
 
 class SiamTracker:
     def __init__(self, model):
         self.model = model
-        checkpoint = torch.load("/home/danylo/GIT/computer-vision-lessons/BaselinePretrained.pth.tar", map_location="cpu")
+        self.template_feature = None
+        self.original_template_feature = None
+        self.bbox, self.need_init = None, False
+
+        checkpoint = torch.load(MODEL_PATH, map_location='cpu')
         self.model.load_state_dict(checkpoint['state_dict'])
         self.model.eval()
-        self.template_feature = None
-        self.template = None
 
-    def init(self, frame, ibbox):
-        template = crop(frame, ibbox, size=127, context_factor=0.6)
+    def init(self, frame, bbox):
+        template = crop(frame, bbox, size=127, context_factor=0.6)
         template = preprocess(template)
-        self.template = template
+        with torch.no_grad():
+            self.template_feature = self.model.embedding_net(template)
+        self.original_template_feature = self.template_feature.clone()
 
     def track(self, frame, prev_bbox):
         search = crop(frame, prev_bbox, size=255, context_factor=0.8)
         search = preprocess(search)
 
         with torch.no_grad():
-            response = self.model(self.template, search)  # 🔥 ВСЕ тут
+            search_feature = self.model.embedding_net(search)  # todo: use forward() instead
+            response = self.model.match_corr(self.template_feature, search_feature)
 
+        # normalization
         response_np = response.squeeze().cpu().numpy()
-
-        # нормалізація
         response_np = response_np - response_np.mean()
         response_np = response_np / (response_np.std() + 1e-8)
 
-        # Hanning window
+        # a bit correct to center
         h, w = response_np.shape
         hanning = np.outer(np.hanning(h), np.hanning(w))
-        window_influence = 0.40
+        window_influence = 0.4
         response_np = (1 - window_influence) * response_np + window_influence * hanning
 
-        # максимум
         pos = np.argmax(response_np)
 
-        # debug
         debug_norm = response_np - response_np.min()
         debug_norm = debug_norm / (debug_norm.max() + 1e-8)
         debug = cv2.resize(debug_norm, (200, 200), interpolation=cv2.INTER_NEAREST)
@@ -128,58 +123,27 @@ class SiamTracker:
         debug_color = cv2.applyColorMap(debug, cv2.COLORMAP_JET)
         cv2.imshow('response map', debug_color)
 
-        return update_bbox(prev_bbox, pos, response_size=h, stride=8)
+        new_bbox = update_bbox(prev_bbox, pos, response_size=h, stride=8)
+
+        response_max = response_np.max()
+        confidence_threshold = 2
+
+        if response_max > confidence_threshold:
+            print(response_max)
+            new_template = preprocess(crop(frame, new_bbox, size=127, context_factor=0.6))
+            with torch.no_grad():
+                new_feature = self.model.embedding_net(new_template)
+            alpha = 0.1
+            self.template_feature = alpha * new_feature + (1 - alpha) * self.template_feature
+
+        gamma = 0.8
+        self.template_feature = gamma * self.template_feature + (1 - gamma) * self.original_template_feature
+
+        return new_bbox
 
 
-def on_mouse(event, x, y, _, __):
-    global bbox, need_init
-
-    if event == cv2.EVENT_LBUTTONDOWN:
-        w, h = 60, 60
-        bbox = (x, y, w, h)
-        print(bbox)
-
-        need_init = True
-
-
-def track_object(video, stop=False):
-    global need_init, bbox
-    counter, kf, points, prev_gray, skip_first = 0, None, None, None, False
-
-    tracker = SiamTracker(SiameseTracker())
-    cv2.namedWindow('tracking with siam')
-    cv2.setMouseCallback('tracking with siam', on_mouse)
-
-    while True:
-        counter += 1
-        ret, frame = video.read()
-        if not ret:
-            break
-
-        if need_init:
-            tracker.init(frame, bbox)
-            need_init = False
-            skip_first = True
-
-        if skip_first:
-            cx, cy, w, h = bbox
-            cv2.rectangle(frame, (int(cx-w//2), int(cy-h//2)), (int(cx+w//2), int(cy+h//2)), (0, 0, 255), 1)
-            skip_first = False
-        elif bbox:
-            bbox = tracker.track(frame, bbox)
-            cx, cy, w, h = bbox
-            cv2.rectangle(frame, (int(cx-w//2), int(cy-h//2)), (int(cx+w//2), int(cy+h//2)), (0, 0, 255), 1)
-
-        cv2.imshow('tracking with siam', frame)
-
-        if stop:
-            key = cv2.waitKey(0) & 0xFF
-            if key == ord('q'):
-                break
-
-    video.release()
-    cv2.destroyAllWindows()
-
-
-on_mouse(cv2.EVENT_LBUTTONDOWN, 166, 221, None, None)
-track_object(video=cap, stop=False)
+    def on_mouse(self, event, x, y, _, __):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            w, h = 60, 60
+            self.bbox = (x, y, w, h)
+            self.need_init = True
