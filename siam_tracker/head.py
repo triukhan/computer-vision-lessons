@@ -30,9 +30,8 @@ class UPChannelBAN(BAN):
         self.search_loc_conv = nn.Conv2d(feature_in, feature_in, kernel_size=3)
         self.loc_adjust = nn.Conv2d(loc_output, loc_output, kernel_size=1)
 
-    def forward(self, z_f, x_f):
-        loc_kernel = self.template_loc_conv(z_f)
-        loc_feature = self.search_loc_conv(x_f)
-
+    def forward(self, template_features, search_features):
+        loc_kernel = self.template_loc_conv(template_features)
+        loc_feature = self.search_loc_conv(search_features)
         loc = self.loc_adjust(xcorr_fast(loc_feature, loc_kernel))
         return loc

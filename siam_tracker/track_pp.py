@@ -15,7 +15,7 @@ def track_object(video_path: Path, stop=False):
     video.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     tracker = SiamTracker(ModelBuilder())
-    cv2.namedWindow('tracking with siam', cv2.WINDOW_NORMAL)
+    cv2.namedWindow('tracking with siam')
     cv2.setMouseCallback('tracking with siam', tracker.on_mouse)
     # tracker.on_mouse(cv2.EVENT_LBUTTONDOWN, 166, 221, None, None)
 

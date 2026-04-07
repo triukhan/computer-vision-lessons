@@ -91,7 +91,7 @@ class SiamTracker:
         # self.template_feature = None
         # self.original_template_feature = None
         self.in_track, self.need_init = False, False
-        self.points = self.generate_points(stride=16, size=15)
+        self.points = self.generate_points(stride=32, size=9)
 
         # checkpoint = torch.load(MODEL_PATH, map_location='cpu')
         # self.model.load_state_dict(checkpoint['state_dict'])
@@ -107,7 +107,20 @@ class SiamTracker:
         return points
 
     def init(self, frame, bbox):
-        template = get_subwindow(frame, bbox, size=127, context_factor=0.6)
+        # self.center_pos = np.array([bbox[0] + (bbox[2] - 1) / 2, bbox[1] + (bbox[3] - 1) / 2])
+        # self.size = np.array([bbox[2], bbox[3]])
+        #
+        #
+        # cx, cy, w, h = bbox
+        #
+        # context_factor = 0.6
+        # context = context_factor * (w + h)
+        # crop_size = int(np.sqrt((w + context) * (h + context)))  # sqrt saves proportions
+        # channel_average = np.mean(frame, axis=(0, 1))
+
+
+
+        template = get_subwindow(frame, bbox, size=127)
         template_tensor = preprocess(template)
         with torch.no_grad():
         #     self.template_feature = self.model.init(template)
@@ -115,64 +128,36 @@ class SiamTracker:
             self.in_track = True
         # self.original_template_feature = self.template_feature.clone()
 
+    def _bbox_clip(self, cx, cy, width, height, boundary):
+        cx = max(0, min(cx, boundary[1]))
+        cy = max(0, min(cy, boundary[0]))
+        width = max(10, min(width, boundary[1]))
+        height = max(10, min(height, boundary[0]))
+        return cx, cy, width, height
+
     def track(self, frame, prev_bbox):
         search = get_subwindow(frame, prev_bbox, size=255, context_factor=0.8)
         search_tensor = preprocess(search)
 
+        print("search_tensor sum:", search_tensor.sum().item())
+
         with torch.no_grad():
             # search_feature = self.model.embedding_net(search)  # todo: use forward() instead
             # response = self.model.match_corr(self.template_feature, search_feature)
-            response = self.model.track(search_tensor)
+            response = self.model.track(search_tensor)['loc']
+            print(response.mean(), response.std())
 
-        loc = response['loc']
 
-        pred_bbox = self._convert_bbox(loc, self.points)
+        pred_bbox = self._convert_bbox(response, self.points)
 
-        def change(r):
-            return np.maximum(r, 1. / r)
+        best_idx = np.argmax(pred_bbox[2, :] * pred_bbox[3, :])  # найбільший bbox як fallback
 
-        def sz(w, h):
-            pad = (w + h) * 0.5
-            return np.sqrt((w + pad) * (h + pad))
+        cx = pred_bbox[0, best_idx]
+        cy = pred_bbox[1, best_idx]
+        width = pred_bbox[2, best_idx]
+        height = pred_bbox[3, best_idx]
 
-        # scale penalty
-        s_c = change(sz(pred_bbox[2, :], pred_bbox[3, :]) /
-                     (sz(self.size[0] * scale_z, self.size[1] * scale_z)))
-
-        # aspect ratio penalty
-        r_c = change((self.size[0] / self.size[1]) /
-                     (pred_bbox[2, :] / pred_bbox[3, :]))
-        penalty = np.exp(-(r_c * s_c - 1) * self.cfg.TRACK.PENALTY_K)
-
-        # score
-        pscore = penalty * score
-
-        # window penalty
-        pscore = pscore * (1 - self.cfg.TRACK.WINDOW_INFLUENCE) + \
-                 self.window * self.cfg.TRACK.WINDOW_INFLUENCE
-
-        best_idx = np.argmax(pscore)
-
-        bbox = pred_bbox[:, best_idx] / scale_z
-
-        lr = penalty[best_idx] * score[best_idx] * self.cfg.TRACK.LR
-
-        cx = bbox[0] + self.center_pos[0]
-
-        cy = bbox[1] + self.center_pos[1]
-
-        # smooth bbox
-        width = self.size[0] * (1 - lr) + bbox[2] * lr
-
-        height = self.size[1] * (1 - lr) + bbox[3] * lr
-
-        # clip boundary
-        cx, cy, width, height = self._bbox_clip(cx, cy, width,
-                                                height, img.shape[:2])
-
-        # udpate state
-        self.center_pos = np.array([cx, cy])
-        self.size = np.array([width, height])
+        cx, cy, width, height = self._bbox_clip(cx, cy, width, height, frame.shape[:2])
 
         new_bbox = [cx - width / 2, cy - height / 2, width, height]
 
