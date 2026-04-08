@@ -1,6 +1,8 @@
 import torch.nn as nn
 import math
 
+__all__ = ['mobilenetv3_small']
+
 
 def _make_divisible(v, divisor, min_value=None):
     if min_value is None:
@@ -12,6 +14,24 @@ def _make_divisible(v, divisor, min_value=None):
     return new_v
 
 
+##(1) Original training method
+# class h_sigmoid(nn.Module):
+#     def __init__(self, inplace=True):
+#         super(h_sigmoid, self).__init__()
+#         self.relu = nn.ReLU6(inplace=inplace)
+
+#     def forward(self, x):
+#         return self.relu(x + 3) / 6
+
+# class h_swish(nn.Module):
+#     def __init__(self, inplace=True):
+#         super(h_swish, self).__init__()
+#         self.sigmoid = h_sigmoid(inplace=inplace)
+
+#     def forward(self, x):
+#         return x * self.sigmoid(x)
+
+# (2) If you want to run faster, before you convert to onnx model, you should use the following operators，since onnx can better optimize them
 class h_sigmoid(nn.Module):
     def __init__(self, inplace=True):
         super(h_sigmoid, self).__init__()
@@ -28,22 +48,6 @@ class h_swish(nn.Module):
 
     def forward(self, x):
         return self.hard_swish(x)
-
-
-def conv_3x3_bn(inp, oup, stride):
-    return nn.Sequential(
-        nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
-        nn.BatchNorm2d(oup),
-        h_swish()
-    )
-
-
-def conv_1x1_bn(inp, oup):
-    return nn.Sequential(
-        nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
-        nn.BatchNorm2d(oup),
-        h_swish()
-    )
 
 
 class SELayer(nn.Module):
@@ -63,6 +67,21 @@ class SELayer(nn.Module):
         y = self.fc(y).view(b, c, 1, 1)
         return x * y
 
+
+def conv_3x3_bn(inp, oup, stride):
+    return nn.Sequential(
+        nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
+        nn.BatchNorm2d(oup),
+        h_swish()
+    )
+
+
+def conv_1x1_bn(inp, oup):
+    return nn.Sequential(
+        nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
+        nn.BatchNorm2d(oup),
+        h_swish()
+    )
 
 
 class InvertedResidual(nn.Module):
@@ -111,9 +130,10 @@ class InvertedResidual(nn.Module):
 
 
 class MobileNetV3(nn.Module):
-    def __init__(self, cfg, mode: str, width_mult=1., used_layers=[2, 3, 4]):
+    def __init__(self, cfgs, mode, num_classes=1000, width_mult=1., used_layers=[2, 3, 4]):
         super(MobileNetV3, self).__init__()
         # setting of inverted residual blocks
+        self.cfgs = cfgs
         assert mode in ['large', 'small']
 
         # building first layer
@@ -122,7 +142,7 @@ class MobileNetV3(nn.Module):
 
         # building inverted residual blocks
         block = InvertedResidual
-        for k, t, c, use_se, use_hs, s in cfg:
+        for k, t, c, use_se, use_hs, s in self.cfgs:
             output_channel = _make_divisible(c * width_mult, 8)
             exp_size = _make_divisible(input_channel * t, 8)
             layers.append(block(input_channel, exp_size, output_channel, k, s, use_se, use_hs))
@@ -150,12 +170,12 @@ class MobileNetV3(nn.Module):
                 m.bias.data.zero_()
 
 
-def mobilenetv3_small_v3(**kwargs):
+def mobilenetv3_small(**kwargs):
     """
-    Constructs a MobileNetV3-Small model
+    Constructs a MobileNetV3-Small model 
     """
-    cfgs = [
-        # k, t, c, SE, HS, s
+    cfgs = [  #
+        # k, t, c, SE, HS, s 
         [3, 1, 16, 1, 0, 2],
         [3, 4.5, 24, 0, 0, 2],
         [3, 3.67, 24, 0, 0, 1],
@@ -164,7 +184,26 @@ def mobilenetv3_small_v3(**kwargs):
         [5, 6, 40, 1, 1, 1],
         [5, 3, 48, 1, 1, 1],
         [5, 3, 48, 1, 1, 1],
-        [5, 6, 96, 1, 1, 1],
+    ]
+
+    return MobileNetV3(cfgs, mode='small', **kwargs)
+
+
+def mobilenetv3_small_v3(**kwargs):
+    """
+    Constructs a MobileNetV3-Small model 
+    """
+    cfgs = [
+        # k, t, c, SE, HS, s 
+        [3, 1, 16, 1, 0, 2],
+        [3, 4.5, 24, 0, 0, 2],
+        [3, 3.67, 24, 0, 0, 1],
+        [5, 4, 40, 1, 1, 2],
+        [5, 6, 40, 1, 1, 1],
+        [5, 6, 40, 1, 1, 1],
+        [5, 3, 48, 1, 1, 1],
+        [5, 3, 48, 1, 1, 1],
+        [5, 6, 96, 1, 1, 1],  # s=2 --> s=1
     ]
 
     return MobileNetV3(cfgs, mode='small', **kwargs)
