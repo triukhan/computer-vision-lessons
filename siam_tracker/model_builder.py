@@ -4,7 +4,6 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 from pathlib import Path
-from re import template
 
 import torch.nn as nn
 import torch
@@ -15,10 +14,6 @@ from siam_tracker.head import UPChannelBAN, DepthwiseBAN
 
 from torchvision.models import mobilenet_v3_small
 
-# from nanotrack.core.config import cfg
-BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent
-MODEL_PATH = PROJECT_ROOT / 'mobilenetv3_small_1.0.pth'
 
 class AdjustLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -49,19 +44,7 @@ class ModelBuilder(nn.Module):
     def __init__(self):
         super(ModelBuilder, self).__init__()
 
-        backbone_model = mobilenetv3_small_v3()
-        checkpoint = torch.load(MODEL_PATH, map_location="cpu")
-        state_dict = checkpoint.get('state_dict', checkpoint)
-
-        from collections import OrderedDict
-        new_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            new_key = k.replace('module.', '')
-            new_state_dict[new_key] = v
-
-        backbone_model.load_state_dict(new_state_dict, strict=False)
-
-        self.backbone = backbone_model
+        self.backbone = mobilenetv3_small_v3()
         self.ban_head = DepthwiseBAN(96, 96)
         self.neck = AdjustLayer(96, 96)
 
