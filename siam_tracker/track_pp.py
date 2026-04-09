@@ -4,7 +4,7 @@ import cv2
 import torch
 
 from siam_tracker.model_builder import ModelBuilder
-from siam_tracker.tracker import NanoTracker
+from siam_tracker.nano_tracker import NanoTracker
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
@@ -45,12 +45,7 @@ def check_keys(model, pretrained_state_dict):
 def load_pretrain(model, pretrained_path):
     print('load pretrained model from {}'.format(pretrained_path))
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     pretrained_dict = torch.load(pretrained_path, map_location=lambda storage, loc: storage, weights_only=False)
-
-    # device = torch.cuda.current_device()
-    # pretrained_dict = torch.load(pretrained_path,
-    #     map_location=lambda storage, loc: storage.cuda(device))
 
     if 'state_dict' in pretrained_dict.keys():
         pretrained_dict = remove_prefix(pretrained_dict['state_dict'], 'module.')
@@ -80,7 +75,7 @@ def track_object(video_path: Path, stop=False):
     model.eval()
 
     tracker = NanoTracker(model)
-    cv2.namedWindow('tracking with siam')
+    cv2.namedWindow('tracking with siam', cv2.WINDOW_NORMAL)
     cv2.setMouseCallback('tracking with siam', tracker.on_mouse)
     # tracker.on_mouse(cv2.EVENT_LBUTTONDOWN, 166, 221, None, None)
 
@@ -95,10 +90,21 @@ def track_object(video_path: Path, stop=False):
 
         if tracker.center_pos is not None:
             tracker.bbox = tracker.track(frame)['bbox']
-            cx, cy, w, h = tracker.bbox
+            x, y, w, h = tracker.bbox
             cv2.rectangle(
-                frame, (int(cx - w // 2), int(cy - h // 2)), (int(cx + w // 2), int(cy + h // 2)), (0, 0, 255), 1
+                frame,
+                (int(tracker.center_pos[0] - 60 / 2), int(tracker.center_pos[1] - 60 / 2)),
+                (int(tracker.center_pos[0] - 60 / 2) + 60, int(tracker.center_pos[1] - 60 / 2) + 60),
+                (0, 255, 0),
+                2
             )
+            # cv2.rectangle(
+            #     frame,
+            #     (int(x), int(y)),
+            #     (int(x + w), int(y + h)),
+            #     (0, 0, 255),
+            #     2
+            # )
 
         cv2.imshow('tracking with siam', frame)
 
