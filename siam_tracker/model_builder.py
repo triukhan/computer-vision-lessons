@@ -59,7 +59,6 @@ class ModelBuilder(nn.Module):
     def track(self, x):
         xf = self.backbone(x)
         cls, loc = self.ban_head(self.zf, xf)
-        print(loc)
 
         return {'cls': cls, 'loc': loc}
 
@@ -68,32 +67,30 @@ class ModelBuilder(nn.Module):
         """
             only used in training
         """
-        # train mode
-        # if len(data) >= 4:
-        #     template = data['template'].cuda()
-        #     search = data['search'].cuda()
-        #     label_loc = data['label_loc'].cuda()
-        #
-        #     # get feature
-        #     zf = self.backbone(template)
-        #     xf = self.backbone(search)
-        #
-        #     # if self.neck is not None:
-        #     #     cls, reg = self.neck(xf, zf)
-        #
-        #     loc = self.ban_head(zf, xf)
-        #
-        #     # loc loss with iou loss
-        #     loc_loss = select_iou_loss(loc, label_loc)
-        #     outputs = {}
-        #
-        #     outputs['total_loss'] = self.cfg.TRAIN.LOC_WEIGHT * loc_loss
-        #     outputs['loc_loss'] = loc_loss
-        #
-        #     return outputs
-        # else:
-        #     xf = self.backbone(data)
-        #     loc = self.ban_head(self.zf, xf)
-        #
-        #     return {'loc': loc}
-        pass
+        if len(data) >= 4:
+            template = data['template'].cuda()
+            search = data['search'].cuda()
+            label_loc = data['label_loc'].cuda()
+
+            # get feature
+            zf = self.backbone(template)
+            xf = self.backbone(search)
+
+            if self.neck is not None:
+                cls, reg = self.neck(xf, zf)
+
+            loc = self.ban_head(zf, xf)
+
+            # loc loss with iou loss
+            loc_loss = select_iou_loss(loc, label_loc)
+            outputs = {}
+
+            outputs['total_loss'] = self.cfg.TRAIN.LOC_WEIGHT * loc_loss
+            outputs['loc_loss'] = loc_loss
+
+            return outputs
+        else:
+            xf = self.backbone(data)
+            loc = self.ban_head(self.zf, xf)
+
+            return {'loc': loc}
