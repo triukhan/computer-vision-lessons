@@ -24,25 +24,38 @@ from torch.utils.data.distributed import DistributedSampler
 
 import sys
 
+from siam_tracker.model_builder import ModelBuilder
+from siam_tracker.train.average_meter import AverageMeter
+from siam_tracker.train.dataset import BANDataset
+from siam_tracker.train.distributed import get_world_size, get_rank, average_reduce, reduce_gradients, new_dist_init, \
+    DistModule
+from siam_tracker.train.lr_scheduler import build_lr_scheduler
+from siam_tracker.utils import describe, print_speed, commit, load_pretrain, restore_from
+
 sys.path.append(os.getcwd())
-
-from nanotrack.utils.lr_scheduler import build_lr_scheduler
-from nanotrack.utils.log_helper import init_log, print_speed, add_file_handler
-from nanotrack.utils.distributed import new_dist_init, DistModule, reduce_gradients, average_reduce, get_rank, \
-    get_world_size
-from nanotrack.utils.model_load import load_pretrain, restore_from
-from nanotrack.utils.average_meter import AverageMeter
-from nanotrack.utils.misc import describe, commit
-from nanotrack.models.model_builder import ModelBuilder
-from nanotrack.datasets.dataset import BANDataset
-from nanotrack.core.config import cfg
-
 logger = logging.getLogger('global')
 parser = argparse.ArgumentParser(description='nanotrack')
-parser.add_argument('--cfg', type=str, default='./models/config/config.yaml', help='configuration of tracking')
 parser.add_argument('--seed', type=int, default=123456, help='random seed')
 parser.add_argument('--local_rank', type=int, default=0, help='compulsory for pytorch launcer')
 args = parser.parse_args()
+
+
+BATCH_SIZE = 64
+NUM_WORKERS = 8
+TRAIN_EPOCH = 10
+TRAIN_LAYERS = ['features']
+LAYERS_LR = 0.1
+BASE_LR = 0.005
+ADJUST = True
+MOMENTUM = 0.9
+WEIGHT_DECAY = 0.0001
+EPOCH = 50
+START_EPOCH = 0
+GRAD_CLIP = 10.0
+PRINT_FREQ = 20
+LOG_GRADS = False
+SNAPSHOT_DIR = './models/snapshot'
+LOG_DIR = './logs'
 
 
 def seed_torch(seed=0):
@@ -57,17 +70,15 @@ def seed_torch(seed=0):
 
 def build_data_loader():
     logger.info("build train dataset")
-    # train_dataset
-    if cfg.BAN.BAN:
-        train_dataset = BANDataset()
+    train_dataset = BANDataset()
     logger.info("build dataset done")
 
     train_sampler = None
     if get_world_size() > 1:
         train_sampler = DistributedSampler(train_dataset)
     train_loader = DataLoader(train_dataset,
-                              batch_size=cfg.TRAIN.BATCH_SIZE,
-                              num_workers=cfg.TRAIN.NUM_WORKERS,
+                              batch_size=BATCH_SIZE,
+                              num_workers=NUM_WORKERS,
                               pin_memory=True,
                               sampler=train_sampler)
     return train_loader
@@ -79,8 +90,8 @@ def build_opt_lr(model, current_epoch=0):
     for m in model.backbone.modules():
         if isinstance(m, nn.BatchNorm2d):
             m.eval()
-    if current_epoch >= cfg.BACKBONE.TRAIN_EPOCH:
-        for layer in cfg.BACKBONE.TRAIN_LAYERS:
+    if current_epoch >= TRAIN_EPOCH:
+        for layer in TRAIN_LAYERS:
             for param in getattr(model.backbone, layer).parameters():
                 param.requires_grad = True
             for m in getattr(model.backbone, layer).modules():
@@ -90,21 +101,21 @@ def build_opt_lr(model, current_epoch=0):
     trainable_params = []
     trainable_params += [{'params': filter(lambda x: x.requires_grad,
                                            model.backbone.parameters()),
-                          'lr': cfg.BACKBONE.LAYERS_LR * cfg.TRAIN.BASE_LR}]
+                          'lr': LAYERS_LR * BASE_LR}]
 
-    if cfg.ADJUST.ADJUST:
+    if ADJUST:
         trainable_params += [{'params': model.neck.parameters(),
-                              'lr': cfg.TRAIN.BASE_LR}]
+                              'lr': BASE_LR}]
 
     trainable_params += [{'params': model.ban_head.parameters(),
-                          'lr': cfg.TRAIN.BASE_LR}]
+                          'lr': BASE_LR}]
 
     optimizer = torch.optim.SGD(trainable_params,
-                                momentum=cfg.TRAIN.MOMENTUM,
-                                weight_decay=cfg.TRAIN.WEIGHT_DECAY)
+                                momentum=MOMENTUM,
+                                weight_decay=WEIGHT_DECAY)
 
-    lr_scheduler = build_lr_scheduler(optimizer, epochs=cfg.TRAIN.EPOCH)
-    lr_scheduler.step(cfg.TRAIN.START_EPOCH)
+    lr_scheduler = build_lr_scheduler(optimizer, epochs=EPOCH)
+    lr_scheduler.step(START_EPOCH)
     return optimizer, lr_scheduler
 
 
@@ -156,13 +167,13 @@ def train(train_loader, model, optimizer, lr_scheduler, tb_writer):
 
     world_size = get_world_size()
     num_per_epoch = len(train_loader.dataset) // \
-                    cfg.TRAIN.EPOCH // (cfg.TRAIN.BATCH_SIZE * world_size)
-    start_epoch = cfg.TRAIN.START_EPOCH
+                    EPOCH // (BATCH_SIZE * world_size)
+    start_epoch = START_EPOCH
     epoch = start_epoch
 
-    if not os.path.exists(cfg.TRAIN.SNAPSHOT_DIR) and \
+    if not os.path.exists(SNAPSHOT_DIR) and \
             get_rank() == 0:
-        os.makedirs(cfg.TRAIN.SNAPSHOT_DIR)
+        os.makedirs(SNAPSHOT_DIR)
 
     logger.info("model\n{}".format(describe(model.module)))
     end = time.time()
@@ -175,12 +186,12 @@ def train(train_loader, model, optimizer, lr_scheduler, tb_writer):
                     {'epoch': epoch,
                      'state_dict': model.module.state_dict(),
                      'optimizer': optimizer.state_dict()},
-                    cfg.TRAIN.SNAPSHOT_DIR + '/checkpoint_e%d.pth' % (epoch))
+                    SNAPSHOT_DIR + '/checkpoint_e%d.pth' % (epoch))
 
-            if epoch == cfg.TRAIN.EPOCH:
+            if epoch == EPOCH:
                 return
 
-            if cfg.BACKBONE.TRAIN_EPOCH == epoch:
+            if TRAIN_EPOCH == epoch:
                 logger.info('start training backbone.')
                 optimizer, lr_scheduler = build_opt_lr(model.module, epoch)
                 logger.info("model\n{}".format(describe(model.module)))
@@ -208,11 +219,11 @@ def train(train_loader, model, optimizer, lr_scheduler, tb_writer):
             loss.backward()
             reduce_gradients(model)
 
-            if rank == 0 and cfg.TRAIN.LOG_GRADS:
+            if rank == 0 and LOG_GRADS:
                 log_grads(model.module, tb_writer, tb_idx)
 
             # clip gradient
-            clip_grad_norm_(model.parameters(), cfg.TRAIN.GRAD_CLIP)
+            clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
 
         batch_time = time.time() - end
@@ -228,7 +239,7 @@ def train(train_loader, model, optimizer, lr_scheduler, tb_writer):
             for k, v in batch_info.items():
                 tb_writer.add_scalar(k, v, tb_idx)
 
-            if (idx + 1) % cfg.TRAIN.PRINT_FREQ == 0:
+            if (idx + 1) % PRINT_FREQ == 0:
                 info = "Epoch: [{}][{}/{}] lr: {:.6f}\n".format(
                     epoch + 1, (idx + 1) % num_per_epoch,
                     num_per_epoch, cur_lr)
@@ -242,7 +253,7 @@ def train(train_loader, model, optimizer, lr_scheduler, tb_writer):
                 logger.info(info)
                 print_speed(idx + 1 + start_epoch * num_per_epoch,
                             average_meter.batch_time.avg,
-                            cfg.TRAIN.EPOCH * num_per_epoch)
+                            EPOCH * num_per_epoch)
         end = time.time()
 
 
@@ -252,45 +263,37 @@ def main():
     logger.info("init done")
 
     # load cfg
-    cfg.merge_from_file(args.cfg)
     if rank == 0:
-        if not os.path.exists(cfg.TRAIN.LOG_DIR):
-            os.makedirs(cfg.TRAIN.LOG_DIR)
-        init_log('global', logging.INFO)
-        if cfg.TRAIN.LOG_DIR:
-            add_file_handler('global',
-                             os.path.join(cfg.TRAIN.LOG_DIR, 'logs.txt'),
-                             logging.INFO)
-
+        if not os.path.exists(LOG_DIR):
+            os.makedirs(LOG_DIR)
         logger.info("Version Information: \n{}\n".format(commit()))
-        logger.info("config \n{}".format(json.dumps(cfg, indent=4)))
 
     model = ModelBuilder().cuda().train()
 
-    if cfg.BACKBONE.PRETRAINED:
-        cur_path = os.path.dirname(os.path.realpath(__file__))
-        backbone_path = os.path.join(cur_path, '../', cfg.BACKBONE.PRETRAINED)
-        load_pretrain(model.backbone, backbone_path)
+    # if cfg.BACKBONE.PRETRAINED:
+    #     cur_path = os.path.dirname(os.path.realpath(__file__))
+    #     backbone_path = os.path.join(cur_path, '../../', cfg.BACKBONE.PRETRAINED)
+    #     load_pretrain(model.backbone, backbone_path)
 
-    if rank == 0 and cfg.TRAIN.LOG_DIR:
-        tb_writer = SummaryWriter(cfg.TRAIN.LOG_DIR)
+    if rank == 0 and LOG_DIR:
+        tb_writer = SummaryWriter(LOG_DIR)
     else:
         tb_writer = None
 
     train_loader = build_data_loader()
 
-    optimizer, lr_scheduler = build_opt_lr(model, cfg.TRAIN.START_EPOCH)
+    optimizer, lr_scheduler = build_opt_lr(model, START_EPOCH)
 
-    if cfg.TRAIN.RESUME:
-        logger.info("resume from {}".format(cfg.TRAIN.RESUME))
-        assert os.path.isfile(cfg.TRAIN.RESUME), \
-            '{} is not a valid file.'.format(cfg.TRAIN.RESUME)
-        model, optimizer, cfg.TRAIN.START_EPOCH = \
-            restore_from(model, optimizer, cfg.TRAIN.RESUME)
+    # if cfg.TRAIN.RESUME:
+    #     logger.info("resume from {}".format(cfg.TRAIN.RESUME))
+    #     assert os.path.isfile(cfg.TRAIN.RESUME), \
+    #         '{} is not a valid file.'.format(cfg.TRAIN.RESUME)
+    #     model, optimizer, cfg.TRAIN.START_EPOCH = \
+    #         restore_from(model, optimizer, cfg.TRAIN.RESUME)
 
     # load pretrain
-    elif cfg.TRAIN.PRETRAINED:
-        load_pretrain(model, cfg.TRAIN.PRETRAINED)
+    # elif cfg.TRAIN.PRETRAINED:
+    #     load_pretrain(model, cfg.TRAIN.PRETRAINED)
     dist_model = DistModule(model)
 
     logger.info(lr_scheduler)
@@ -298,6 +301,7 @@ def main():
 
     # start training
     train(train_loader, dist_model, optimizer, lr_scheduler, tb_writer)
+
 
 
 if __name__ == '__main__':
