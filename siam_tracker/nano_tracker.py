@@ -7,7 +7,6 @@ import torch
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
-MODEL_PATH = PROJECT_ROOT / 'mobilenetv3_small_1.0.pth'
 H, W = 60, 60
 
 
@@ -58,12 +57,11 @@ def get_subwindow_tracking(im, pos, model_sz, original_sz, avg_chans):
         pos = [pos, pos]
     sz = original_sz
     im_sz = im.shape
-    c = (original_sz + 1) / 2
-    # context_xmin = round(pos[0] - c) # py2 and py3 round
-    context_xmin = np.floor(pos[0] - c + 0.5)
+    center = (original_sz + 1) / 2
+
+    context_xmin = np.floor(pos[0] - center + 0.5)
     context_xmax = context_xmin + sz - 1
-    # context_ymin = round(pos[1] - c)
-    context_ymin = np.floor(pos[1] - c + 0.5)
+    context_ymin = np.floor(pos[1] - center + 0.5)
     context_ymax = context_ymin + sz - 1
     left_pad = int(max(0., -context_xmin))
     top_pad = int(max(0., -context_ymin))
@@ -100,43 +98,7 @@ def get_subwindow_tracking(im, pos, model_sz, original_sz, avg_chans):
     im_patch = im_patch[np.newaxis, :, :, :]
     im_patch = im_patch.astype(np.float32)
     im_patch = torch.from_numpy(im_patch)
-    # if cfg.CUDA:
-    #     im_patch = im_patch.cuda()
     return im_patch
-
-
-def preprocess(img):
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    tensor = torch.from_numpy(img).unsqueeze(0)
-
-    return tensor
-
-
-def update_bbox(prev_bbox, pos, response_size=8, stride=8):
-    row = pos // response_size
-    col = pos % response_size
-    center = response_size // 2
-
-    disp_x = (col - center) * stride
-    disp_y = (row - center) * stride
-
-    search_size = 255
-    prev_cx, prev_cy, prev_w, prev_h = prev_bbox
-    context = 0.8 * (prev_w + prev_h)
-    crop_size = np.sqrt((prev_w + context) * (prev_h + context))
-    scale = crop_size / search_size
-
-    new_cx = prev_cx + disp_x * scale
-    new_cy = prev_cy + disp_y * scale
-
-    # smoothing
-    alpha = 0.5
-    new_cx = alpha * new_cx + (1 - alpha) * prev_cx
-    new_cy = alpha * new_cy + (1 - alpha) * prev_cy
-
-    return new_cx, new_cy, 60, 60
 
 
 class NanoTracker:
@@ -202,8 +164,7 @@ class NanoTracker:
         self.center_pos = np.array([bbox[0], bbox[1]])
         self.size = np.array([bbox[2], bbox[3]])
 
-        w = bbox[2]
-        h = bbox[3]
+        w, h = bbox[2], bbox[3]
 
         context = self.context_amount * (w + h)
         crop_size = int(np.sqrt((w + context) * (h + context)))  # sqrt saves proportions
@@ -225,8 +186,6 @@ class NanoTracker:
         score = self._convert_score(outputs['cls'])
         pred_bbox = self._convert_bbox(outputs['loc'], self.points)
 
-        # print(pred_bbox)
-
         def change(r):
             return np.maximum(r, 1. / r)
 
@@ -235,12 +194,10 @@ class NanoTracker:
             return np.sqrt((w + pad) * (h + pad))
 
         # scale penalty
-        s_c = change(sz(pred_bbox[2, :], pred_bbox[3, :]) /
-                     (sz(self.size[0] * scale_z, self.size[1] * scale_z)))
+        s_c = change(sz(pred_bbox[2, :], pred_bbox[3, :]) / (sz(self.size[0] * scale_z, self.size[1] * scale_z)))
 
         # aspect ratio penalty
-        r_c = change((self.size[0] / self.size[1]) /
-                     (pred_bbox[2, :] / pred_bbox[3, :]))
+        r_c = change((self.size[0] / self.size[1]) / (pred_bbox[2, :] / pred_bbox[3, :]))
         penalty = np.exp(-(r_c * s_c - 1) * 0.138)
 
         # score
@@ -259,24 +216,32 @@ class NanoTracker:
         cx = bbox[0] + self.center_pos[0]
         cy = bbox[1] + self.center_pos[1]
 
+        # dx = pred_bbox[0, best_idx] / scale_z
+        # dy = pred_bbox[1, best_idx] / scale_z
+        #
+        # cx = self.center_pos[0] + dx
+        # cy = self.center_pos[1] + dy
+        #
+        # # 🔒 фіксований розмір
+        # width = self.size[0]
+        # height = self.size[1]
+
+
         # smooth bbox
         width = self.size[0] * (1 - lr) + bbox[2] * lr
         height = self.size[1] * (1 - lr) + bbox[3] * lr
 
         # clip boundary
-        cx, cy, width, height = self._bbox_clip(cx, cy, width,
-                                                height, img.shape[:2])
+        cx, cy, width, height = self._bbox_clip(cx, cy, width, height, img.shape[:2])
 
         # udpate state
         self.center_pos = np.array([cx, cy])
         self.size = np.array([width, height])
 
-        bbox = [cx - width / 2,
-                cy - height / 2,
-                width,
-                height]
+        bbox = [cx - width / 2, cy - height / 2, width, height]
 
         best_score = score[best_idx]
+        print(best_score)
         return {
             'bbox': bbox,
             'best_score': best_score
